@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
 
 __author__ = 'Jason Cheng'
 
-import asynico, logging
+import asyncio, logging
 
 import aiomysql
 
-def log(sql,args=()):
+def log(sql, args=()):
     logging.info('SQL: %s' % sql)
 
 async def create_pool(loop, **kw):
     logging.info('create database connection pool...')
     global __pool
-    __pool = await aiomysql.create_pool(
-        host = kw.get('host','localhost'),
-        port = kw.get('port', 3306),
-        user = kw['user'],
-        password = kw['password'],
-        db = kw['db'],
-        charser = kw.get('charset','utf8'),
-        autocommit = kw.get('autocommit',True),
-        maxsize = kw.get('maxsize',10),
-        minsize = kw.get('minsize',1),
-        loop = loop
+    __pool = yield from aiomysql.create_pool(
+        host=kw.get('host', 'localhost'),
+        port=kw.get('port', 3306),
+        user=kw['user'],
+        password=kw['password'],
+        db=kw['db'],
+        charset=kw.get('charset', 'utf8'),
+        autocommit=kw.get('autocommit', True),
+        maxsize=kw.get('maxsize', 10),
+        minsize=kw.get('minsize', 1),
+        loop=loop
     )
 
-async def select(sql, args, size = None):
+async def select(sql, args, size=None):
     log(sql, args)
     global __pool
     async with __pool.get() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.excute(sql.replace('?', '%s'), args or ())
+            await cur.execute(sql.replace('?', '%s'), args or ())
             if size:
                 rs = await cur.fetchmany(size)
             else:
@@ -39,7 +39,7 @@ async def select(sql, args, size = None):
         logging.info('rows returned: %s' % len(rs))
         return rs
 
-async def execute(sql, args):
+async def execute(sql, args, autocommit=True):
     log(sql)
     async with __pool.get() as conn:
         if not autocommit:
@@ -48,6 +48,8 @@ async def execute(sql, args):
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(sql.replace('?', '%s'), args)
                 affected = cur.rowcount
+            if not autocommit:
+                await conn.commit()
         except BaseException as e:
             if not autocommit:
                 await conn.rollback()
@@ -183,7 +185,7 @@ class Model(dict, metaclass=ModelMetaclass):
                 args.extend(limit)
             else:
                 raise ValueError('Invalid limit value: %s' % str(limit))
-        rs = await select(' '.join(sql), args)
+        rs = yield from select(' '.join(sql), args)
         return [cls(**r) for r in rs]
 
     @classmethod
@@ -193,7 +195,7 @@ class Model(dict, metaclass=ModelMetaclass):
         if where:
             sql.append('where')
             sql.append(where)
-        rs = await select(' '.join(sql), args, 1)
+        rs = yield from select(' '.join(sql), args, 1)
         if len(rs) == 0:
             return None
         return rs[0]['_num_']
@@ -201,7 +203,7 @@ class Model(dict, metaclass=ModelMetaclass):
     @classmethod
     async def find(cls, pk):
         ' find object by primary key. '
-        rs = await select('%s where `%s`=?' % (cls.__select__, cls.__primary_key__), [pk], 1)
+        rs = yield from select('%s where `%s`=?' % (cls.__select__, cls.__primary_key__), [pk], 1)
         if len(rs) == 0:
             return None
         return cls(**rs[0])
@@ -209,20 +211,19 @@ class Model(dict, metaclass=ModelMetaclass):
     async def save(self):
         args = list(map(self.getValueOrDefault, self.__fields__))
         args.append(self.getValueOrDefault(self.__primary_key__))
-        rows = await execute(self.__insert__, args)
+        rows = yield from execute(self.__insert__, args)
         if rows != 1:
             logging.warn('failed to insert record: affected rows: %s' % rows)
 
     async def update(self):
         args = list(map(self.getValue, self.__fields__))
         args.append(self.getValue(self.__primary_key__))
-        rows = await execute(self.__update__, args)
+        rows = yield from execute(self.__update__, args)
         if rows != 1:
             logging.warn('failed to update by primary key: affected rows: %s' % rows)
 
     async def remove(self):
         args = [self.getValue(self.__primary_key__)]
-        rows = await execute(self.__delete__, args)
+        rows = yield from execute(self.__delete__, args)
         if rows != 1:
             logging.warn('failed to remove by primary key: affected rows: %s' % rows)
-
